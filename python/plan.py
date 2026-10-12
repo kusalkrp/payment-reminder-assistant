@@ -1,4 +1,4 @@
-"""Payment reminder rules engine (part 1).
+"""Payment reminder rules engine (part 1 & part 3).
 
 Run from inside python/:
 
@@ -33,6 +33,43 @@ def parse_date(date_str):
         return datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def format_message(customer, invoice_id, amount, currency, due_date_str, days_overdue, step):
+    """Generate email reminder message adhering strictly to requirements:
+
+    - Customer name, invoice id, due date (YYYY-MM-DD)
+    - Amount with currency and 2 decimals
+    - Number of days overdue
+    - Tone fitting step: friendly, firm, or final
+    - No other figures, no made-up claims/fees/deadlines, no mention of earlier reminders
+    """
+    amount_str = f"{currency} {amount:.2f}"
+    if step == "friendly":
+        return (
+            f"Dear {customer},\n\n"
+            f"This is a friendly reminder that invoice {invoice_id} for {amount_str} "
+            f"was due on {due_date_str} and is now {days_overdue} days overdue. "
+            f"Please let us know once payment has been arranged.\n\n"
+            f"Best regards"
+        )
+    elif step == "firm":
+        return (
+            f"Dear {customer},\n\n"
+            f"Please be advised that payment for invoice {invoice_id} in the amount of {amount_str} "
+            f"remains outstanding. It was due on {due_date_str} and is currently {days_overdue} days overdue. "
+            f"Please arrange settlement as soon as possible.\n\n"
+            f"Sincerely"
+        )
+    elif step == "final":
+        return (
+            f"Dear {customer},\n\n"
+            f"This is a final notice regarding overdue invoice {invoice_id} for {amount_str}. "
+            f"The invoice was due on {due_date_str} and is now {days_overdue} days overdue. "
+            f"Immediate payment is required.\n\n"
+            f"Sincerely"
+        )
+    return ""
 
 
 def validate_invoice(inv, today_date, duplicate_ids):
@@ -170,12 +207,27 @@ def build_plan(invoices, sent, today):
         if sent_weight >= step_weight:
             continue
 
+        customer = inv.get("customer", "")
+        currency = inv.get("currency", "")
+        due_date_raw = inv.get("due_date", "")
+        amount = inv.get("amount", 0.0)
+
+        message = format_message(
+            customer=customer,
+            invoice_id=inv_id,
+            amount=amount,
+            currency=currency,
+            due_date_str=due_date_raw,
+            days_overdue=days_overdue,
+            step=step,
+        )
+
         actions.append({
             "invoice_id": inv_id,
             "step": step,
             "needs_approval": needs_approval,
             "days_overdue": days_overdue,
-            "message": "",
+            "message": message,
         })
 
     # Plain text character-by-character sorting by invoice_id

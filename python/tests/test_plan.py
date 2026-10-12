@@ -1,7 +1,8 @@
-"""Unit tests for payment reminder rules engine: validation, overdue calculation, tiers, and sent suppression."""
+"""Unit tests for payment reminder rules engine: validation, overdue calculation, tiers, sent suppression, and message generation."""
 
+import re
 import unittest
-from plan import build_plan, parse_date
+from plan import build_plan, format_message, parse_date
 
 
 class ShapeAndDateTest(unittest.TestCase):
@@ -192,6 +193,66 @@ class SortingTest(unittest.TestCase):
         plan2 = build_plan(skipped_invs, [], "2026-10-12")
         skipped_ids = [s["invoice_id"] for s in plan2["skipped"]]
         self.assertEqual(skipped_ids, ["INV-10", "INV-100", "INV-99"])
+
+
+class MessageFormatTest(unittest.TestCase):
+    def test_all_tiers_contain_required_fields(self):
+        for step in ["friendly", "firm", "final"]:
+            msg = format_message(
+                customer="Acme Corp",
+                invoice_id="INV-999",
+                amount=1250.0,
+                currency="EUR",
+                due_date_str="2026-09-30",
+                days_overdue=12,
+                step=step
+            )
+            self.assertIn("Acme Corp", msg)
+            self.assertIn("INV-999", msg)
+            self.assertIn("EUR 1250.00", msg)
+            self.assertIn("2026-09-30", msg)
+            self.assertIn("12 days overdue", msg)
+
+    def test_negative_constraints_and_no_extra_figures(self):
+        for step in ["friendly", "firm", "final"]:
+            msg = format_message(
+                customer="Acme Corp",
+                invoice_id="INV-999",
+                amount=1250.0,
+                currency="EUR",
+                due_date_str="2026-09-30",
+                days_overdue=12,
+                step=step
+            )
+            # No mention of fees, interest, made up deadlines, or earlier reminders
+            lower = msg.lower()
+            self.assertNotIn("fee", lower)
+            self.assertNotIn("interest", lower)
+            self.assertNotIn("earlier", lower)
+            self.assertNotIn("previous", lower)
+            self.assertNotIn("already reminded", lower)
+
+            # Strip known valid figures and verify no other digits remain
+            # Known: 999 (from INV-999), 1250.00, 2026-09-30, 12
+            cleaned = (
+                msg.replace("INV-999", "")
+                .replace("1250.00", "")
+                .replace("2026-09-30", "")
+                .replace("12 days overdue", "")
+            )
+            found_digits = re.findall(r"\d", cleaned)
+            self.assertEqual(found_digits, [], f"Found unexpected digits in {step} message: {found_digits}")
+
+    def test_plan_actions_populate_message(self):
+        invoices = [
+            {"id": "INV-101", "customer": "Test Corp", "amount": 500.0, "currency": "EUR", "due_date": "2026-10-09", "paid_date": None}
+        ]
+        plan = build_plan(invoices, [], "2026-10-12")
+        self.assertEqual(len(plan["actions"]), 1)
+        action = plan["actions"][0]
+        self.assertTrue(len(action["message"]) > 0)
+        self.assertIn("Test Corp", action["message"])
+        self.assertIn("EUR 500.00", action["message"])
 
 
 if __name__ == "__main__":
