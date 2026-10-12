@@ -255,5 +255,65 @@ class MessageFormatTest(unittest.TestCase):
         self.assertIn("EUR 500.00", action["message"])
 
 
+class CLITest(unittest.TestCase):
+    def test_cli_success(self):
+        import subprocess
+        import sys
+        import tempfile
+        import os
+        import json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "actions.json")
+            cmd = [
+                sys.executable,
+                "plan.py",
+                "--invoices", "../data/invoices.json",
+                "--sent", "../data/sent.json",
+                "--today", "2026-10-12",
+                "--out", out_path
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"CLI failed: {res.stderr}")
+            self.assertTrue(os.path.exists(out_path))
+            with open(out_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["today"], "2026-10-12")
+            self.assertIn("actions", data)
+            self.assertIn("skipped", data)
+            self.assertGreater(len(data["actions"]), 0)
+            self.assertGreater(len(data["skipped"]), 0)
+
+    def test_cli_invalid_today_exits_nonzero(self):
+        import subprocess
+        import sys
+        cmd = [
+            sys.executable,
+            "plan.py",
+            "--invoices", "../data/invoices.json",
+            "--sent", "../data/sent.json",
+            "--today", "2026-02-30",
+            "--out", "dummy.json"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Error", res.stderr)
+
+    def test_cli_missing_invoices_exits_nonzero(self):
+        import subprocess
+        import sys
+        cmd = [
+            sys.executable,
+            "plan.py",
+            "--invoices", "nonexistent.json",
+            "--sent", "../data/sent.json",
+            "--today", "2026-10-12",
+            "--out", "dummy.json"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Error", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

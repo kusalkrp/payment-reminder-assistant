@@ -238,7 +238,7 @@ def build_plan(invoices, sent, today):
 
 
 def read_json(path):
-    with open(path, encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -250,13 +250,45 @@ def main():
     parser.add_argument("--out", required=True, help="path to write the plan JSON")
     args = parser.parse_args()
 
-    invoices = read_json(args.invoices)
-    sent = read_json(args.sent)
-    plan = build_plan(invoices, sent, args.today)
+    # Validate --today argument
+    if parse_date(args.today) is None:
+        sys.stderr.write(f"Error: Invalid --today date '{args.today}'. Must be a valid date in YYYY-MM-DD format.\n")
+        sys.exit(1)
 
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(plan, f, indent=2)
-        f.write("\n")
+    # Read invoices file
+    try:
+        invoices = read_json(args.invoices)
+    except Exception as e:
+        sys.stderr.write(f"Error: Could not read invoices file '{args.invoices}': {e}\n")
+        sys.exit(1)
+
+    # Read sent file
+    try:
+        sent = read_json(args.sent)
+    except Exception as e:
+        sys.stderr.write(f"Error: Could not read sent file '{args.sent}': {e}\n")
+        sys.exit(1)
+
+    # Build the plan
+    try:
+        plan = build_plan(invoices, sent, args.today)
+    except Exception as e:
+        sys.stderr.write(f"Error: Failed to build reminder plan: {e}\n")
+        sys.exit(1)
+
+    # Write output JSON
+    try:
+        out_dir = os.path.dirname(args.out)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(plan, f, indent=2)
+            f.write("\n")
+    except Exception as e:
+        sys.stderr.write(f"Error: Could not write output file '{args.out}': {e}\n")
+        sys.exit(1)
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
