@@ -1,4 +1,4 @@
-"""Unit tests for payment reminder input validation and error handling."""
+"""Unit tests for payment reminder rules engine: validation, overdue calculation, tiers, and sent suppression."""
 
 import unittest
 from plan import build_plan, parse_date
@@ -27,6 +27,8 @@ class ValidationEdgeCasesTest(unittest.TestCase):
         ]
         plan = build_plan(invoices, [], "2026-10-12")
         self.assertEqual(plan["skipped"], [{"invoice_id": "INV-1", "reason": "duplicate_id"}])
+        self.assertEqual(len(plan["actions"]), 1)
+        self.assertEqual(plan["actions"][0]["invoice_id"], "INV-2")
 
     def test_invalid_amount(self):
         cases = [
@@ -94,6 +96,102 @@ class ValidationEdgeCasesTest(unittest.TestCase):
         # 4. invalid_due_date takes priority over invalid_paid_date
         inv = {"id": "O3", "amount": 100.0, "due_date": "2026-02-30", "paid_date": "future-or-bad"}
         self.assertEqual(build_plan([inv], [], "2026-10-12")["skipped"][0]["reason"], "invalid_due_date")
+
+
+class RulesLogicTest(unittest.TestCase):
+    def test_paid_invoices_plan_nothing(self):
+        inv1 = {"id": "I1", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": "2026-09-01", "paid_date": "2026-10-12"}
+        inv2 = {"id": "I2", "customer": "B", "amount": 100.0, "currency": "EUR", "due_date": "2026-09-01", "paid_date": "2026-09-15"}
+        plan = build_plan([inv1, inv2], [], "2026-10-12")
+        self.assertEqual(plan["actions"], [])
+        self.assertEqual(plan["skipped"], [])
+
+    def test_overdue_thresholds(self):
+        # 0, 1, 2 days overdue and future invoices -> plan nothing
+        cases_none = [
+            ("2026-10-12", 0),
+            ("2026-10-11", 1),
+            ("2026-10-10", 2),
+            ("2026-10-15", -3),
+        ]
+        for due, days in cases_none:
+            inv = {"id": "T1", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": due, "paid_date": None}
+            plan = build_plan([inv], [], "2026-10-12")
+            self.assertEqual(plan["actions"], [], f"Expected no action for {days} days overdue")
+
+        # 3 to 9 days -> friendly, needs_approval = False
+        for due in ["2026-10-09", "2026-10-03"]:
+            inv = {"id": "T2", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": due, "paid_date": None}
+            plan = build_plan([inv], [], "2026-10-12")
+            self.assertEqual(plan["actions"][0]["step"], "friendly")
+            self.assertFalse(plan["actions"][0]["needs_approval"])
+
+        # 10 to 23 days -> firm, needs_approval = True
+        for due in ["2026-10-02", "2026-09-19"]:
+            inv = {"id": "T3", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": due, "paid_date": None}
+            plan = build_plan([inv], [], "2026-10-12")
+            self.assertEqual(plan["actions"][0]["step"], "firm")
+            self.assertTrue(plan["actions"][0]["needs_approval"])
+
+        # 24+ days -> final, needs_approval = True
+        for due in ["2026-09-18", "2026-08-01"]:
+            inv = {"id": "T4", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": due, "paid_date": None}
+            plan = build_plan([inv], [], "2026-10-12")
+            self.assertEqual(plan["actions"][0]["step"], "final")
+            self.assertTrue(plan["actions"][0]["needs_approval"])
+
+    def test_sent_suppression_and_single_highest_action(self):
+        # 12 days overdue = firm. Nothing sent -> plan firm
+        inv = {"id": "S1", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": "2026-09-30", "paid_date": None}
+        plan = build_plan([inv], [], "2026-10-12")
+        self.assertEqual(plan["actions"][0]["step"], "firm")
+
+        # 12 days overdue = firm. Friendly sent -> plan firm
+        plan = build_plan([inv], [{"invoice_id": "S1", "step": "friendly", "sent_on": "2026-10-05"}], "2026-10-12")
+        self.assertEqual(plan["actions"][0]["step"], "firm")
+
+        # 12 days overdue = firm. Firm sent -> plan nothing
+        plan = build_plan([inv], [{"invoice_id": "S1", "step": "firm", "sent_on": "2026-10-05"}], "2026-10-12")
+        self.assertEqual(plan["actions"], [])
+
+        # 12 days overdue = firm. Final sent -> plan nothing
+        plan = build_plan([inv], [{"invoice_id": "S1", "step": "final", "sent_on": "2026-10-05"}], "2026-10-12")
+        self.assertEqual(plan["actions"], [])
+
+        # 30 days overdue = final. Firm sent -> plan final
+        inv_final = {"id": "S2", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": "2026-09-10", "paid_date": None}
+        plan = build_plan([inv_final], [{"invoice_id": "S2", "step": "firm", "sent_on": "2026-09-20"}], "2026-10-12")
+        self.assertEqual(plan["actions"][0]["step"], "final")
+
+        # Ignore irrelevant sent entries (unknown IDs or unknown steps)
+        plan = build_plan([inv], [
+            {"invoice_id": "UNKNOWN", "step": "firm", "sent_on": "2026-10-01"},
+            {"invoice_id": "S1", "step": "unknown_step", "sent_on": "2026-10-01"}
+        ], "2026-10-12")
+        self.assertEqual(plan["actions"][0]["step"], "firm")
+
+
+class SortingTest(unittest.TestCase):
+    def test_character_order_sorting(self):
+        # Plain text character-by-character order: INV-100 comes before INV-99
+        invoices = [
+            {"id": "INV-99", "customer": "A", "amount": 100.0, "currency": "EUR", "due_date": "2026-09-01", "paid_date": None},
+            {"id": "INV-100", "customer": "B", "amount": 200.0, "currency": "EUR", "due_date": "2026-09-01", "paid_date": None},
+            {"id": "INV-10", "customer": "C", "amount": 300.0, "currency": "EUR", "due_date": "2026-09-01", "paid_date": None},
+        ]
+        plan = build_plan(invoices, [], "2026-10-12")
+        ids = [a["invoice_id"] for a in plan["actions"]]
+        self.assertEqual(ids, ["INV-10", "INV-100", "INV-99"])
+
+        # Also for skipped
+        skipped_invs = [
+            {"id": "INV-99", "amount": -1},
+            {"id": "INV-100", "amount": -1},
+            {"id": "INV-10", "amount": -1},
+        ]
+        plan2 = build_plan(skipped_invs, [], "2026-10-12")
+        skipped_ids = [s["invoice_id"] for s in plan2["skipped"]]
+        self.assertEqual(skipped_ids, ["INV-10", "INV-100", "INV-99"])
 
 
 if __name__ == "__main__":

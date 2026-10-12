@@ -16,6 +16,12 @@ import sys
 
 DATE_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+STEP_WEIGHTS = {
+    "friendly": 1,
+    "firm": 2,
+    "final": 3,
+}
+
 
 def parse_date(date_str):
     """Parse a date string in YYYY-MM-DD format if valid, else return None."""
@@ -95,6 +101,17 @@ def build_plan(invoices, sent, today):
     actions = []
     skipped = []
 
+    # Map sent reminders: highest valid step sent per invoice_id
+    max_sent_step = {}
+    if isinstance(sent, list):
+        for entry in sent:
+            if isinstance(entry, dict):
+                inv_id = entry.get("invoice_id")
+                step = entry.get("step")
+                if inv_id and step in STEP_WEIGHTS:
+                    current_max = max_sent_step.get(inv_id, 0)
+                    max_sent_step[inv_id] = max(current_max, STEP_WEIGHTS[step])
+
     if not isinstance(invoices, list):
         return {"today": today, "actions": [], "skipped": []}
 
@@ -125,6 +142,44 @@ def build_plan(invoices, sent, today):
             skipped.append({"invoice_id": inv_id, "reason": reason})
             continue
 
+        # 2. Paid check: if paid_date <= today, plan nothing
+        if paid_date is not None and paid_date <= today_date:
+            continue
+
+        # 3. Not yet: fewer than 3 days overdue -> plan nothing
+        days_overdue = (today_date - due_date).days
+        if days_overdue < 3:
+            continue
+
+        # 4. Highest step reached
+        if days_overdue >= 24:
+            step = "final"
+            needs_approval = True
+            step_weight = STEP_WEIGHTS["final"]
+        elif days_overdue >= 10:
+            step = "firm"
+            needs_approval = True
+            step_weight = STEP_WEIGHTS["firm"]
+        else:
+            step = "friendly"
+            needs_approval = False
+            step_weight = STEP_WEIGHTS["friendly"]
+
+        # If that step, or a higher one, is already in sent.json, plan nothing
+        sent_weight = max_sent_step.get(inv_id, 0)
+        if sent_weight >= step_weight:
+            continue
+
+        actions.append({
+            "invoice_id": inv_id,
+            "step": step,
+            "needs_approval": needs_approval,
+            "days_overdue": days_overdue,
+            "message": "",
+        })
+
+    # Plain text character-by-character sorting by invoice_id
+    actions.sort(key=lambda a: str(a["invoice_id"]))
     skipped.sort(key=lambda s: str(s["invoice_id"]))
 
     return {"today": today, "actions": actions, "skipped": skipped}
