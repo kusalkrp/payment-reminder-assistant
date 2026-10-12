@@ -3,13 +3,82 @@
 Run from inside python/:
 
     python plan.py --invoices ../data/invoices.json --sent ../data/sent.json --today 2026-10-12 --out ../actions.json
-
-This starter only reads the files and writes an empty plan in the required shape.
-The rules are yours to build.
 """
 
 import argparse
+from collections import Counter
+from datetime import date, datetime
 import json
+import math
+import os
+import re
+import sys
+
+DATE_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_date(date_str):
+    """Parse a date string in YYYY-MM-DD format if valid, else return None."""
+    if not isinstance(date_str, str):
+        return None
+    if not DATE_REGEX.match(date_str):
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def validate_invoice(inv, today_date, duplicate_ids):
+    """Check an invoice for bad data in the strict order required by specification:
+
+    1. duplicate_id: Handled at collection level
+    2. invalid_amount: missing, not a JSON number (bool or non-number), or <= 0
+    3. missing_due_date: missing, null, or empty string ""
+    4. invalid_due_date: not a real calendar date in YYYY-MM-DD format
+    5. invalid_paid_date: not null and not a real YYYY-MM-DD date, or date > today
+
+    Returns (reason, parsed_due_date, parsed_paid_date) where reason is None if valid.
+    """
+    if not isinstance(inv, dict):
+        return ("invalid_amount", None, None)
+
+    inv_id = str(inv.get("id")) if inv.get("id") is not None else ""
+
+    if inv_id in duplicate_ids:
+        return ("duplicate_id", None, None)
+
+    # 2. invalid_amount
+    amount = inv.get("amount")
+    if (
+        amount is None
+        or isinstance(amount, bool)
+        or not isinstance(amount, (int, float))
+        or math.isnan(amount)
+        or math.isinf(amount)
+        or amount <= 0
+    ):
+        return ("invalid_amount", None, None)
+
+    # 3. missing_due_date
+    due_date_raw = inv.get("due_date")
+    if due_date_raw is None or due_date_raw == "":
+        return ("missing_due_date", None, None)
+
+    # 4. invalid_due_date
+    due_date = parse_date(due_date_raw)
+    if due_date is None:
+        return ("invalid_due_date", None, None)
+
+    # 5. invalid_paid_date
+    paid_date_raw = inv.get("paid_date")
+    paid_date = None
+    if paid_date_raw is not None:
+        paid_date = parse_date(paid_date_raw)
+        if paid_date is None or paid_date > today_date:
+            return ("invalid_paid_date", None, None)
+
+    return (None, due_date, paid_date)
 
 
 def build_plan(invoices, sent, today):
@@ -19,9 +88,46 @@ def build_plan(invoices, sent, today):
     sent: the list from sent.json
     today: a date string, YYYY-MM-DD
     """
-    # TODO: apply the rules in README.md part 1 and fill both lists,
-    # sorted by invoice id. Each action also needs a message (part 3).
-    return {"today": today, "actions": [], "skipped": []}
+    today_date = parse_date(today)
+    if today_date is None:
+        raise ValueError(f"Invalid today date: {today}")
+
+    actions = []
+    skipped = []
+
+    if not isinstance(invoices, list):
+        return {"today": today, "actions": [], "skipped": []}
+
+    # Count IDs to identify duplicates across the file
+    id_counts = Counter()
+    for inv in invoices:
+        if isinstance(inv, dict) and "id" in inv and inv["id"] is not None:
+            id_counts[str(inv["id"])] += 1
+
+    duplicate_ids = {inv_id for inv_id, count in id_counts.items() if count > 1}
+
+    # Every duplicate id is skipped once
+    for dup_id in duplicate_ids:
+        skipped.append({"invoice_id": dup_id, "reason": "duplicate_id"})
+
+    for inv in invoices:
+        if not isinstance(inv, dict):
+            continue
+
+        inv_id = str(inv.get("id")) if inv.get("id") is not None else ""
+
+        # Skip invoices already marked as duplicate
+        if inv_id in duplicate_ids:
+            continue
+
+        reason, due_date, paid_date = validate_invoice(inv, today_date, duplicate_ids)
+        if reason:
+            skipped.append({"invoice_id": inv_id, "reason": reason})
+            continue
+
+    skipped.sort(key=lambda s: str(s["invoice_id"]))
+
+    return {"today": today, "actions": actions, "skipped": skipped}
 
 
 def read_json(path):
